@@ -1409,8 +1409,11 @@ describe.skipIf(posixShellRunner === null)("remote launch script (executed)", ()
     assert.include(launch.stderr, "It wrote nothing to");
     assert.notInclude(launch.stderr, "STALE_PREVIOUS_RUN");
 
+    // The background job's shell opens server.log, so a job killed before it got
+    // that far leaves no file. That is as clean as an empty one; only stale bytes fail.
+    const logFile = sh(`${work}/home/.t3/ssh-launch/launch-test/server.log`);
     const logBytes = runShell(
-      `set -eu\nwc -c < ${sh(`${work}/home/.t3/ssh-launch/launch-test/server.log`)}`,
+      `set -eu\nif [ -e ${logFile} ]; then wc -c < ${logFile}; else echo 0; fi`,
     );
     assert.strictEqual(logBytes.status, 0, logBytes.stderr);
     assert.strictEqual(logBytes.stdout.trim(), "0");
