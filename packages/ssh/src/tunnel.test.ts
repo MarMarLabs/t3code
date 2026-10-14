@@ -1389,6 +1389,12 @@ describe.skipIf(posixShellRunner === null)("remote launch script (executed)", ()
     const work = workLine.slice("work:".length).trim();
     fixtures.push(work);
 
+    const script = SshTunnel.buildRemoteLaunchScript({ nodeScriptPath: `${work}/serve.mjs` });
+    // A missing log passes the byte check below, so this run cannot tell unlinking
+    // before the launch from unlinking after it. Pin the order, which also rules out
+    // truncating in place.
+    assert.include(script, 'rm -f "$LOG_FILE"\n  nohup env ');
+
     // The script reads $HOME and finds node on $PATH, so the overrides ride in
     // the script itself, ahead of the generated text.
     const launch = runShell(
@@ -1397,7 +1403,7 @@ describe.skipIf(posixShellRunner === null)("remote launch script (executed)", ()
         "export HOME",
         `PATH=${sh(`${work}/bin`)}":$PATH"`,
         "export PATH",
-        SshTunnel.buildRemoteLaunchScript({ nodeScriptPath: `${work}/serve.mjs` }),
+        script,
       ].join("\n"),
       ["launch-test"],
     );
