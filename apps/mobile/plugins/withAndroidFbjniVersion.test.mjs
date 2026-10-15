@@ -96,10 +96,11 @@ describe("withAndroidFbjniVersion", () => {
     const { exp } = getConfig(NodePath.resolve(import.meta.dirname, ".."), {
       isModdedConfig: true,
     });
+    const projectBuildGradle = exp.mods?.android?.projectBuildGradle;
     // Run the app's registered root-Gradle mods without its unrelated native-file mods.
     const result = await prebuildRootGradle("build.gradle", ROOT_BUILD_GRADLE, (config) => ({
       ...config,
-      mods: { android: { projectBuildGradle: exp.mods?.android?.projectBuildGradle } },
+      mods: { android: projectBuildGradle ? { projectBuildGradle } : {} },
     }));
 
     expectProjectWideForce(result);
