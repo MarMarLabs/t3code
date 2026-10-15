@@ -1,9 +1,29 @@
-import { assert, describe, it } from "@effect/vitest";
-import * as Effect from "effect/Effect";
-import { beforeEach, vi } from "vite-plus/test";
+// @effect-diagnostics nodeBuiltinImport:off - Exercises installs and persisted traces at the dependency quit boundary.
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
-const { autoUpdaterMock } = vi.hoisted(() => ({
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { assert, describe, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import { AppImageUpdater } from "electron-updater";
+import * as DesktopConfig from "../app/DesktopConfig.ts";
+import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopObservability from "../app/DesktopObservability.ts";
+import { DesktopTraceFlush } from "../app/DesktopObservability.ts";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
+
+const { autoUpdaterMock, moduleState } = vi.hoisted(() => ({
+  moduleState: { reads: 0, current: undefined as unknown },
   autoUpdaterMock: {
+    logger: null as AppImageUpdater["logger"],
     allowDowngrade: false,
     allowPrerelease: false,
     autoDownload: true,
@@ -20,14 +40,125 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("electron-updater", () => ({
-  autoUpdater: autoUpdaterMock,
-}));
+vi.mock("electron-updater", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("electron-updater")>();
+  return {
+    AppImageUpdater: actual.AppImageUpdater,
+    get autoUpdater() {
+      moduleState.reads++;
+      return moduleState.current ?? autoUpdaterMock;
+    },
+  };
+});
 
 import * as ElectronUpdater from "./ElectronUpdater.ts";
 
+const layerUpdater = ElectronUpdater.layer.pipe(
+  Layer.provide(Layer.succeed(DesktopTraceFlush, { flush: Effect.void })),
+);
+
+const work: Array<string> = [];
+const originalAppImage = process.env.APPIMAGE;
+afterEach(() => {
+  if (originalAppImage === undefined) delete process.env.APPIMAGE;
+  else process.env.APPIMAGE = originalAppImage;
+  for (const root of work.splice(0)) NodeFS.rmSync(root, { force: true, recursive: true });
+});
+
+function realUpdaterFixture() {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-updater-bridge-"));
+  work.push(root);
+  const appImageFile = NodePath.join(root, "T3-Code.AppImage");
+  const pending = NodePath.join(root, "pending");
+  NodeFS.mkdirSync(pending);
+  const installerPath = NodePath.join(pending, "T3-Code.AppImage");
+  const old = "#!/bin/sh\n# old\nexit 0\n";
+  const update = "#!/bin/sh\n# new\nexit 0\n";
+  NodeFS.writeFileSync(appImageFile, old, { mode: 0o755 });
+  NodeFS.writeFileSync(installerPath, update, { mode: 0o644 });
+  process.env.APPIMAGE = appImageFile;
+  const adapter = {
+    version: "1.2.2",
+    name: "t3code",
+    isPackaged: true,
+    appUpdateConfigPath: NodePath.join(root, "app-update.yml"),
+    userDataPath: root,
+    baseCachePath: root,
+    whenReady: () => Promise.resolve(),
+    quit: vi.fn(),
+    relaunch: () => {},
+    onQuit: () => {},
+  };
+  const updater = new AppImageUpdater(null, adapter);
+  const errors: Array<string> = [];
+  updater.on("error", (error: Error) => errors.push(error.message));
+  Object.assign(updater, {
+    downloadedUpdateHelper: {
+      file: installerPath,
+      downloadedFileInfo: {
+        sha512: NodeCrypto.createHash("sha512").update(update).digest("base64"),
+      },
+    },
+  });
+  moduleState.current = updater;
+  return {
+    root,
+    appImageFile,
+    installerPath,
+    old,
+    update,
+    updater,
+    errors,
+    adapter,
+  };
+}
+
+function traceLayer(root: string, otlpLogs = false) {
+  const environment = DesktopEnvironment.layer({
+    dirname: "/repo/apps/desktop/dist-electron",
+    homeDirectory: root,
+    platform: "linux",
+    processArch: "x64",
+    appVersion: "1.2.2",
+    appPath: "/repo",
+    isPackaged: true,
+    resourcesPath: "/repo/resources",
+    runningUnderArm64Translation: false,
+  }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          T3CODE_HOME: root,
+          ...(otlpLogs ? { T3CODE_OTLP_LOGS_URL: "http://collector.invalid/v1/logs" } : {}),
+        }),
+      ),
+    ),
+  );
+  return ElectronUpdater.layer.pipe(
+    Layer.provideMerge(DesktopObservability.layer.pipe(Layer.provideMerge(environment))),
+    Layer.provide(NodeServices.layer),
+    Layer.provide(
+      otlpLogs
+        ? Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response(null, { status: 200 })),
+              ),
+            ),
+          )
+        : NodeHttpClient.layerUndici,
+    ),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+  );
+}
+
 describe("ElectronUpdater", () => {
   beforeEach(() => {
+    moduleState.reads = 0;
+    moduleState.current = undefined;
+    autoUpdaterMock.logger = null;
     autoUpdaterMock.allowDowngrade = false;
     autoUpdaterMock.allowPrerelease = false;
     autoUpdaterMock.autoDownload = true;
@@ -45,6 +176,132 @@ describe("ElectronUpdater", () => {
     autoUpdaterMock.setFeedURL.mockClear();
   });
 
+  it.effect("keeps disabled and non-AppImage updater construction lazy", () =>
+    Effect.gen(function* () {
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+      const registration = updater.on("unused", () => {});
+      assert.isDefined(registration);
+      assert.equal(moduleState.reads, 0);
+      yield* updater.setAutoDownload(false);
+      assert.equal(moduleState.reads, 1);
+      assert.isFalse(autoUpdaterMock.autoDownload);
+    }).pipe(Effect.provide(layerUpdater)),
+  );
+
+  it.effect("restores the previous logger when its scope closes", () =>
+    Effect.gen(function* () {
+      const previous = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      autoUpdaterMock.logger = previous;
+      yield* Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        yield* updater.setAutoDownload(false);
+        assert.notStrictEqual(autoUpdaterMock.logger, previous);
+      }).pipe(Effect.provide(layerUpdater));
+      assert.strictEqual(autoUpdaterMock.logger, previous);
+    }),
+  );
+
+  describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("AppImage install", () => {
+    it.effect("keeps the verified installer after the updater scope closes", () => {
+      const input = realUpdaterFixture();
+      const previous = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      input.updater.logger = previous;
+      return Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          yield* updater.setAutoDownload(false);
+        }).pipe(Effect.provide(layerUpdater));
+        assert.strictEqual(input.updater.logger, previous);
+        Object.assign(input.updater, {
+          downloadedUpdateHelper: {
+            file: input.installerPath,
+            downloadedFileInfo: { sha512: "bad-digest" },
+          },
+        });
+        assert.isFalse(input.updater.install(true, false));
+        assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.old);
+        assert.equal(NodeFS.readFileSync(input.installerPath, "utf8"), input.update);
+        assert.lengthOf(input.errors, 1);
+        assert.include(input.errors[0]!, "does not match");
+      });
+    });
+
+    // Runs the real install with the explicit-quit flags, then the adapter quit.
+    // The dependency's intervening Electron event needs a packaged app.
+    // Returns the trace file as it was when the original quit ran.
+    const traceAtQuit = (input: ReturnType<typeof realUpdaterFixture>) =>
+      Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const originalQuit = input.adapter.quit;
+        let trace = "";
+        let finish = () => {};
+        const quit = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        originalQuit.mockImplementation(() => {
+          const tracePath = NodePath.join(environment.logDir, "desktop.trace.ndjson");
+          trace = NodeFS.existsSync(tracePath) ? NodeFS.readFileSync(tracePath, "utf8") : "";
+          finish();
+        });
+        yield* updater.setAutoDownload(false);
+        vi.spyOn(input.updater, "spawnLog").mockResolvedValue(true);
+        assert.isTrue(input.updater.install(true, true));
+        input.adapter.quit();
+        yield* Effect.promise(() => quit);
+        assert.equal(originalQuit.mock.calls.length, 1);
+        return trace;
+      });
+
+    it.effect.each([false, true])(
+      "persists the install records before the adapter quits (OTLP logs %s)",
+      (otlpLogs) => {
+        const input = realUpdaterFixture();
+        return Effect.gen(function* () {
+          const persisted = yield* traceAtQuit(input);
+          assert.include(persisted, "desktop-updater");
+          assert.include(persisted, "AppImage update stage started");
+          assert.include(persisted, "AppImage update verified");
+          assert.include(persisted, "AppImage update committed");
+          assert.equal(persisted.includes('"name":"AppImage update committed"'), !otlpLogs);
+          assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.update);
+          assert.deepEqual(input.errors, []);
+        }).pipe(Effect.provide(traceLayer(input.root, otlpLogs)));
+      },
+    );
+
+    it.effect("persists an install failure and preserves the old app", () => {
+      const input = realUpdaterFixture();
+      const originalQuit = input.adapter.quit;
+      Object.assign(input.updater, {
+        downloadedUpdateHelper: {
+          file: input.installerPath,
+          downloadedFileInfo: { sha512: "bad-digest" },
+        },
+      });
+      return Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const { flush } = yield* DesktopTraceFlush;
+        yield* updater.setAutoDownload(false);
+        vi.spyOn(input.updater, "spawnLog").mockResolvedValue(true);
+        assert.isFalse(input.updater.install(true, true));
+        // A failed explicit install keeps the app running. Drain the sink
+        // before reading, without closing the scope or waiting for its timer.
+        yield* flush;
+        const persisted = NodeFS.readFileSync(
+          NodePath.join(environment.logDir, "desktop.trace.ndjson"),
+          "utf8",
+        );
+        assert.include(persisted, "AppImage update install failed");
+        assert.include(persisted, "does not match");
+        assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.old);
+        assert.lengthOf(input.errors, 1);
+        assert.equal(originalQuit.mock.calls.length, 0);
+      }).pipe(Effect.provide(traceLayer(input.root)));
+    });
+  });
+
   it.effect("scopes updater event listeners", () =>
     Effect.gen(function* () {
       const listener = vi.fn();
@@ -58,7 +315,7 @@ describe("ElectronUpdater", () => {
 
       assert.deepEqual(autoUpdaterMock.on.mock.calls, [["update-available", listener]]);
       assert.deepEqual(autoUpdaterMock.removeListener.mock.calls, [["update-available", listener]]);
-    }).pipe(Effect.provide(ElectronUpdater.layer)),
+    }).pipe(Effect.provide(layerUpdater)),
   );
 
   it.effect("wraps rejected update checks in the method-specific typed error", () =>
@@ -75,7 +332,7 @@ describe("ElectronUpdater", () => {
       assert.strictEqual(error.cause, cause);
       assert.equal(error.message, "Electron updater failed to check for updates on channel beta.");
       assert.notInclude(error.message, cause.message);
-    }).pipe(Effect.provide(ElectronUpdater.layer)),
+    }).pipe(Effect.provide(layerUpdater)),
   );
 
   it.effect("preserves the execution-time channel on download failures", () =>
@@ -95,7 +352,7 @@ describe("ElectronUpdater", () => {
         "Electron updater failed to download the update on channel nightly.",
       );
       assert.notInclude(error.message, cause.message);
-    }).pipe(Effect.provide(ElectronUpdater.layer)),
+    }).pipe(Effect.provide(layerUpdater)),
   );
 
   it.effect("sets full changelog mode", () =>
@@ -107,7 +364,7 @@ describe("ElectronUpdater", () => {
 
       yield* updater.setFullChangelog(false);
       assert.equal(autoUpdaterMock.fullChangelog, false);
-    }).pipe(Effect.provide(ElectronUpdater.layer)),
+    }).pipe(Effect.provide(layerUpdater)),
   );
 
   it.effect("preserves quit-and-install flags and the execution-time channel", () =>
@@ -134,6 +391,6 @@ describe("ElectronUpdater", () => {
       );
       assert.notInclude(error.message, cause.message);
       assert.deepEqual(autoUpdaterMock.quitAndInstall.mock.calls, [[true, false]]);
-    }).pipe(Effect.provide(ElectronUpdater.layer)),
+    }).pipe(Effect.provide(layerUpdater)),
   );
 });

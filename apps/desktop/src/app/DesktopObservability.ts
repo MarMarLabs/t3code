@@ -38,6 +38,11 @@ const DESKTOP_TRACE_BATCH_WINDOW_MS = 1_000;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_BYTES = 1024 * 1024;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_CHUNKS = 256;
 
+export class DesktopTraceFlush extends Context.Service<
+  DesktopTraceFlush,
+  { readonly flush: Effect.Effect<void> }
+>()("@t3tools/desktop/app/DesktopObservability/DesktopTraceFlush") {}
+
 export interface RotatingLogFileWriter {
   readonly writeBytes: (chunk: Uint8Array) => Effect.Effect<void>;
   readonly writeText: (chunk: string) => Effect.Effect<void>;
@@ -703,7 +708,10 @@ const layerTelemetry = Layer.unwrap(
           ...(delegate ? { delegate } : {}),
         });
 
-        return Layer.succeed(Tracer.Tracer, tracer);
+        return Layer.mergeAll(
+          Layer.succeed(Tracer.Tracer, tracer),
+          Layer.succeed(DesktopTraceFlush, { flush: sink.flush }),
+        );
       }),
     ).pipe(Layer.provide(OtlpExporter.layerFlusher));
 
