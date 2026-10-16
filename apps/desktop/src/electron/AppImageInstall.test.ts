@@ -13,7 +13,13 @@ import { installAppImageUpdate, verifyAppImageInstalls } from "./AppImageInstall
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFS>();
-  return { ...actual, fsyncSync: vi.fn(actual.fsyncSync), renameSync: vi.fn(actual.renameSync) };
+  return {
+    ...actual,
+    fsyncSync: vi.fn(actual.fsyncSync),
+    renameSync: vi.fn(actual.renameSync),
+    realpathSync: vi.fn(actual.realpathSync),
+    statSync: vi.fn(actual.statSync),
+  };
 });
 
 const OLD_APPIMAGE = "#!/bin/sh\n# old build\nexit 0\n";
@@ -23,6 +29,8 @@ const sha512 = (content: string) =>
 
 const work: Array<string> = [];
 afterEach(() => {
+  vi.mocked(NodeFS.realpathSync).mockReset();
+  vi.mocked(NodeFS.statSync).mockReset();
   vi.mocked(NodeFS.fsyncSync).mockReset();
   vi.mocked(NodeFS.renameSync).mockClear();
   for (const directory of work.splice(0))
@@ -253,6 +261,44 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("installAppImag
       assert.isFalse(NodeFS.existsSync(input.appImageFile));
     },
   );
+
+  it("keeps the destination when the cache is an alias that realpath does not resolve", () => {
+    const input = fixture("T3-Code-1.2.2-x86_64.AppImage");
+    const alias = NodePath.join(input.root, "alias");
+    NodeFS.symlinkSync(input.applications, alias);
+    const installerPath = NodePath.join(alias, NodePath.basename(input.installerPath));
+    NodeFS.renameSync(input.installerPath, installerPath);
+    const entry = NodePath.join(input.applications, NodePath.basename(installerPath));
+    // A mount alias keeps the two paths apart, which a symlink does not.
+    vi.mocked(NodeFS.realpathSync).mockImplementation(((path: NodeFS.PathLike) =>
+      NodePath.resolve(String(path))) as unknown as typeof NodeFS.realpathSync);
+    const destination = installAppImageUpdate({
+      ...input,
+      installerPath,
+      sha512: sha512(NEW_APPIMAGE),
+    });
+    assert.equal(destination, entry);
+    assert.equal(NodeFS.readFileSync(destination, "utf8"), NEW_APPIMAGE);
+  });
+
+  it("still removes the cached installer when only the inode number matches", () => {
+    const input = fixture("T3-Code-1.2.2-x86_64.AppImage");
+    const entry = NodePath.join(input.applications, NodePath.basename(input.installerPath));
+    const stat = vi.mocked(NodeFS.statSync).getMockImplementation() as (
+      ...args: Array<unknown>
+    ) => NodeFS.BigIntStats;
+    vi.mocked(NodeFS.statSync).mockImplementation(((path: NodeFS.PathLike, options?: unknown) => {
+      const result = stat(path, options);
+      if (String(path) === input.installerPath && typeof result.dev === "bigint") {
+        const destinationStats = stat(entry, options);
+        return { ...result, dev: result.dev + 1n, ino: destinationStats.ino };
+      }
+      return result;
+    }) as unknown as typeof NodeFS.statSync);
+    const destination = installAppImageUpdate({ ...input, sha512: sha512(NEW_APPIMAGE) });
+    assert.equal(destination, entry);
+    assert.isFalse(NodeFS.existsSync(input.installerPath));
+  });
 
   it("rejects an empty source even when its digest matches", () => {
     const input = fixture();
