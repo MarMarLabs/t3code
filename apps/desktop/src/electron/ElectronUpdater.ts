@@ -248,7 +248,12 @@ export const layer = Layer.effect(
         let drained: Promise<void> | undefined;
         internals.spawnLog = function (...args) {
           const launch = () => previousSpawnLog.apply(this, args);
-          drained = runPromise(flush);
+          // Start once the install call has unwound, so spans that end as
+          // quitAndInstall returns are drained too. The scheduled quit runs
+          // after this and waits for the same drain.
+          drained = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+            runPromise(flush),
+          );
           return drained.then(launch, launch);
         };
         adapter.quit = function () {

@@ -466,6 +466,44 @@ describe("ElectronUpdater", () => {
       );
     });
 
+    it.effect("drains the span that ends as the install call returns", () => {
+      const input = realUpdaterFixture();
+      const traceExports: Array<string> = [];
+      let trace = "";
+      let exported: ReadonlyArray<string> = [];
+      let finish = () => {};
+      const quit = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
+        exported = [...traceExports];
+        return Promise.resolve(true);
+      });
+      return Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        input.adapter.quit.mockImplementation(() => {
+          trace = NodeFS.readFileSync(
+            NodePath.join(environment.logDir, "desktop.trace.ndjson"),
+            "utf8",
+          );
+          finish();
+        });
+        yield* updater.setAutoDownload(false);
+        // As in DesktopUpdates, the install runs inside a span that ends after
+        // the call returns, and the dependency then schedules the quit.
+        yield* Effect.sync(() => assert.isTrue(input.updater.install(true, true))).pipe(
+          Effect.withSpan("desktop.updates.installDownloadedUpdate"),
+        );
+        setImmediate(() => input.adapter.quit());
+        yield* Effect.promise(() => quit);
+        assert.include(trace, "desktop.updates.installDownloadedUpdate");
+        assert.isTrue(
+          exported.some((body) => body.includes("desktop.updates.installDownloadedUpdate")),
+        );
+      }).pipe(Effect.provide(traceLayer(input.root, { traces: traceExports })));
+    });
+
     it.effect("drains the records before it quits when nothing was launched", () => {
       const input = realUpdaterFixture();
       const steps: Array<string> = [];
