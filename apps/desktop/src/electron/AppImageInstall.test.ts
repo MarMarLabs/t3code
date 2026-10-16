@@ -300,6 +300,31 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("installAppImag
     assert.isFalse(NodeFS.existsSync(input.installerPath));
   });
 
+  it("keeps the destination when the same path reports different inode numbers", () => {
+    const input = fixture("T3-Code-1.2.2-x86_64.AppImage");
+    const installerPath = NodePath.join(input.applications, NodePath.basename(input.installerPath));
+    NodeFS.renameSync(input.installerPath, installerPath);
+    const stat = vi.mocked(NodeFS.statSync).getMockImplementation() as (
+      ...args: Array<unknown>
+    ) => NodeFS.BigIntStats;
+    let inodeOffset = 0n;
+    vi.mocked(NodeFS.statSync).mockImplementation(((path: NodeFS.PathLike, options?: unknown) => {
+      const result = stat(path, options);
+      if (String(path) === installerPath && typeof result.ino === "bigint") {
+        return { ...result, ino: result.ino + inodeOffset++ };
+      }
+      return result;
+    }) as unknown as typeof NodeFS.statSync);
+    const destination = installAppImageUpdate({
+      ...input,
+      installerPath,
+      sha512: sha512(NEW_APPIMAGE),
+    });
+    assert.equal(destination, installerPath);
+    assert.equal(NodeFS.readFileSync(destination, "utf8"), NEW_APPIMAGE);
+    assert.isFalse(NodeFS.existsSync(input.appImageFile));
+  });
+
   it("rejects an empty source even when its digest matches", () => {
     const input = fixture();
     NodeFS.writeFileSync(input.installerPath, "");
