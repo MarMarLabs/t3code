@@ -11,6 +11,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { AppImageUpdater } from "electron-updater";
@@ -56,6 +57,21 @@ import * as ElectronUpdater from "./ElectronUpdater.ts";
 const layerUpdater = ElectronUpdater.layer.pipe(
   Layer.provide(Layer.succeed(DesktopTraceFlush, { flush: Effect.void })),
 );
+
+const TraceRecordLine = Schema.Struct({
+  name: Schema.String,
+  attributes: Schema.Record(Schema.String, Schema.Unknown),
+  events: Schema.Array(Schema.Struct({ name: Schema.String })),
+});
+
+const decodeTraceRecordLine = Schema.decodeUnknownSync(Schema.fromJsonString(TraceRecordLine));
+
+const updaterSpans = (trace: string) =>
+  trace
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => decodeTraceRecordLine(line))
+    .filter((record) => record.name === "desktop.updater");
 
 const work: Array<string> = [];
 const originalAppImage = process.env.APPIMAGE;
@@ -113,7 +129,9 @@ function realUpdaterFixture() {
   };
 }
 
-function traceLayer(root: string, otlpLogs = false) {
+// Passing `logExports` turns on OTLP logs and keeps each exported body there.
+function traceLayer(root: string, logExports?: Array<string>) {
+  const otlpLogs = logExports !== undefined;
   const environment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/dist-electron",
     homeDirectory: root,
@@ -143,9 +161,12 @@ function traceLayer(root: string, otlpLogs = false) {
         ? Layer.succeed(
             HttpClient.HttpClient,
             HttpClient.make((request) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(request, new Response(null, { status: 200 })),
-              ),
+              Effect.sync(() => {
+                if (request.body._tag === "Uint8Array") {
+                  logExports.push(new TextDecoder().decode(request.body.body));
+                }
+                return HttpClientResponse.fromWeb(request, new Response(null, { status: 200 }));
+              }),
             ),
           )
         : NodeHttpClient.layerUndici,
@@ -257,16 +278,41 @@ describe("ElectronUpdater", () => {
       "persists the install records before the adapter quits (OTLP logs %s)",
       (otlpLogs) => {
         const input = realUpdaterFixture();
+        const logExports: Array<string> = [];
         return Effect.gen(function* () {
-          const persisted = yield* traceAtQuit(input);
-          assert.include(persisted, "desktop-updater");
-          assert.include(persisted, "AppImage update stage started");
-          assert.include(persisted, "AppImage update verified");
-          assert.include(persisted, "AppImage update committed");
-          assert.equal(persisted.includes('"name":"AppImage update committed"'), !otlpLogs);
+          // Closing the layer scope drains the OTLP log exporter.
+          const persisted = yield* traceAtQuit(input).pipe(
+            Effect.provide(traceLayer(input.root, otlpLogs ? logExports : undefined)),
+          );
+          const spans = updaterSpans(persisted);
+          assert.isNotEmpty(spans);
+          for (const span of spans) {
+            assert.equal(span.attributes.component, "desktop-updater");
+            assert.oneOf(span.attributes.level, ["logDebug", "logInfo", "logWarning", "logError"]);
+            assert.notProperty(span.attributes, "message");
+            assert.notInclude(JSON.stringify(span.attributes), "AppImage update");
+          }
+          const events = spans.flatMap((span) => span.events.map((event) => event.name));
+          for (const record of [
+            "AppImage update stage started",
+            "AppImage update verified",
+            "AppImage update committed",
+          ]) {
+            // The span event logger writes the text to the trace. An OTLP
+            // logger takes that job, and the trace stops carrying it.
+            assert.equal(
+              events.some((name) => name.startsWith(record)),
+              !otlpLogs,
+            );
+            assert.equal(persisted.includes(record), !otlpLogs);
+            assert.equal(
+              logExports.some((body) => body.includes(record)),
+              otlpLogs,
+            );
+          }
           assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.update);
           assert.deepEqual(input.errors, []);
-        }).pipe(Effect.provide(traceLayer(input.root, otlpLogs)));
+        });
       },
     );
 
@@ -295,6 +341,13 @@ describe("ElectronUpdater", () => {
         );
         assert.include(persisted, "AppImage update install failed");
         assert.include(persisted, "does not match");
+        // The error text can name paths, so it stays out of span attributes.
+        const spans = updaterSpans(persisted);
+        assert.isNotEmpty(spans);
+        for (const span of spans) {
+          assert.notProperty(span.attributes, "message");
+          assert.notInclude(JSON.stringify(span.attributes), "does not match");
+        }
         assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.old);
         assert.lengthOf(input.errors, 1);
         assert.equal(originalQuit.mock.calls.length, 0);

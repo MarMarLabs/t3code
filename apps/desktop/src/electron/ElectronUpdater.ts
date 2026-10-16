@@ -207,10 +207,10 @@ export const layer = Layer.effect(
           .slice(0, 2048);
         runSync(
           log[level](message).pipe(
-            // Attributes retain diagnostics in the local trace even when an OTLP
-            // logger replaces the span-event logger.
+            // The text can name paths or URLs, so it stays in the log record.
+            // Span attributes keep only bounded values.
             Effect.withSpan("desktop.updater", {
-              attributes: { component: "desktop-updater", message, level },
+              attributes: { component: "desktop-updater", level },
             }),
           ),
         );
