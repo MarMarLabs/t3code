@@ -144,20 +144,31 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("installAppImag
   it("does not follow or remove a pre-existing staging symlink", () => {
     const input = fixture();
     const sentinel = NodePath.join(input.root, "sentinel");
-    const otherStage = NodePath.join(input.applications, ".T3-Code.AppImage.update");
-    NodeFS.writeFileSync(sentinel, "keep me");
-    NodeFS.symlinkSync(sentinel, otherStage);
+    NodeFS.mkdirSync(sentinel);
+    NodeFS.writeFileSync(NodePath.join(sentinel, "keep"), "keep me");
+    // Plant a link at each fixed name a predictable stage could use.
+    const planted = [".t3code-update", ".t3code-update-", ".T3-Code.AppImage.update"].map((name) =>
+      NodePath.join(input.applications, name),
+    );
+    for (const link of planted) NodeFS.symlinkSync(sentinel, link);
+    let stage = "";
     assert.throws(
       () =>
         installAppImageUpdate({
           ...input,
           sha512: sha512(NEW_APPIMAGE),
-          copyFile: copyThatRunsOutOfSpace,
+          copyFile: (from, to) => {
+            stage = NodePath.dirname(to);
+            assert.isTrue(NodeFS.lstatSync(stage).isDirectory());
+            assert.notInclude(planted, stage);
+            copyThatRunsOutOfSpace(from, to);
+          },
         }),
       /ENOSPC/,
     );
-    assert.equal(NodeFS.readFileSync(sentinel, "utf8"), "keep me");
-    assert.isTrue(NodeFS.lstatSync(otherStage).isSymbolicLink());
+    assert.deepEqual(NodeFS.readdirSync(sentinel), ["keep"]);
+    for (const link of planted) assert.isTrue(NodeFS.lstatSync(link).isSymbolicLink());
+    assert.isFalse(NodeFS.existsSync(stage));
   });
 
   it("gives overlapping attempts separate stages and cleans only its own", () => {
