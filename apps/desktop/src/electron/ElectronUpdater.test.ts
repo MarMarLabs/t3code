@@ -10,6 +10,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
@@ -130,14 +131,19 @@ function realUpdaterFixture() {
   };
 }
 
-// Each array in `exports` turns on that OTLP signal and keeps every body the
-// collector takes for it. The collector never replies while `answering` is false.
+// `logs` and `traces` each turn on that OTLP signal and keep every body the
+// collector takes for it. The collector never replies while `answering` is
+// false, and trace file writes wait for `diskReady` when it is given.
 function traceLayer(
   root: string,
-  exports: { readonly logs?: Array<string>; readonly traces?: Array<string> } = {},
-  answering = () => true,
+  options: {
+    readonly logs?: Array<string>;
+    readonly traces?: Array<string>;
+    readonly answering?: () => boolean;
+    readonly diskReady?: Promise<void>;
+  } = {},
 ) {
-  const { logs, traces } = exports;
+  const { logs, traces, answering = () => true, diskReady } = options;
   const environment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/dist-electron",
     homeDirectory: root,
@@ -160,8 +166,27 @@ function traceLayer(
       ),
     ),
   );
+  const layerFileSystem = Layer.effect(
+    FileSystem.FileSystem,
+    Effect.map(FileSystem.FileSystem, (fileSystem) =>
+      FileSystem.FileSystem.of({
+        ...fileSystem,
+        writeFile: (path, data, writeOptions) =>
+          diskReady !== undefined && path.endsWith("desktop.trace.ndjson")
+            ? Effect.promise(() => diskReady).pipe(
+                Effect.andThen(fileSystem.writeFile(path, data, writeOptions)),
+              )
+            : fileSystem.writeFile(path, data, writeOptions),
+      }),
+    ),
+  );
   return ElectronUpdater.layer.pipe(
-    Layer.provideMerge(DesktopObservability.layer.pipe(Layer.provideMerge(environment))),
+    Layer.provideMerge(
+      DesktopObservability.layer.pipe(
+        Layer.provide(layerFileSystem),
+        Layer.provideMerge(environment),
+      ),
+    ),
     Layer.provide(NodeServices.layer),
     Layer.provide(
       logs || traces
@@ -520,9 +545,68 @@ describe("ElectronUpdater", () => {
             answering = true;
           }),
         ),
-        Effect.provide(traceLayer(input.root, { logs: logExports }, () => answering)),
+        Effect.provide(traceLayer(input.root, { logs: logExports, answering: () => answering })),
       );
     });
+
+    // With OTLP logs on, the collector does not answer either.
+    it.effect.each([false, true])(
+      "launches the update when the trace file write never settles (OTLP logs %s)",
+      (otlpLogs) => {
+        const input = realUpdaterFixture();
+        const logExports: Array<string> = [];
+        const steps: Array<string> = [];
+        let answering = false;
+        let release = () => {};
+        const diskReady = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
+          steps.push("launch");
+          return Promise.resolve(true);
+        });
+        input.adapter.quit.mockImplementation(() => {
+          steps.push("quit");
+        });
+        return Effect.gen(function* () {
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          yield* updater.setAutoDownload(false);
+          assert.isTrue(input.updater.install(true, true));
+          input.adapter.quit();
+          // The export leaves while the write is stuck, so an interval export
+          // cannot take the records first. The test clock has not moved.
+          yield* Effect.promise(() =>
+            vi.waitFor(() => assert.lengthOf(logExports, otlpLogs ? 1 : 0), { timeout: 5_000 }),
+          );
+          yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+          assert.deepEqual(steps, []);
+          assert.equal(
+            logExports.some((body) => body.includes("AppImage update committed")),
+            otlpLogs,
+          );
+          // One bound covers both waits.
+          yield* TestClock.adjust("2 seconds");
+          yield* Effect.promise(() =>
+            vi.waitFor(() => assert.deepEqual(steps, ["launch", "quit"]), { timeout: 5_000 }),
+          );
+        }).pipe(
+          // Lets the held write, and the flush at scope close behind it, finish.
+          Effect.ensuring(
+            Effect.sync(() => {
+              answering = true;
+              release();
+            }),
+          ),
+          Effect.provide(
+            traceLayer(input.root, {
+              ...(otlpLogs ? { logs: logExports } : {}),
+              answering: () => answering,
+              diskReady,
+            }),
+          ),
+        );
+      },
+    );
   });
 
   it.effect("scopes updater event listeners", () =>
