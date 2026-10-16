@@ -62,8 +62,10 @@ export function installAppImageUpdate(input: {
   }
   // A private directory prevents another attempt or a pre-existing symlink
   // from sharing our stage. The final rename stays on the app's filesystem.
+  // A fixed prefix keeps a long AppImage name from making the stage name
+  // longer than the filesystem allows.
   const stageDirectory = NodeFS.mkdtempSync(
-    NodePath.join(NodePath.dirname(destination), `.${NodePath.basename(destination)}.update-`),
+    NodePath.join(NodePath.dirname(destination), ".t3code-update-"),
   );
   const staged = NodePath.join(stageDirectory, "update.AppImage");
   const cleanup = (path: string, directory = false) => {

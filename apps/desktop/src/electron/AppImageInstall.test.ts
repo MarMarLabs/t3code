@@ -121,6 +121,26 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("installAppImag
     });
   });
 
+  it("stages a custom name that is near the filename length limit", () => {
+    // 250 bytes is a valid name, but the name plus a suffix is not.
+    const name = `${"T".repeat(241)}.AppImage`;
+    assert.equal(Buffer.byteLength(name), 250);
+    const input = fixture(name);
+    const destination = installAppImageUpdate({
+      ...input,
+      sha512: sha512(NEW_APPIMAGE),
+      copyFile: (from, to) => {
+        const stage = NodePath.dirname(to);
+        assert.equal(NodePath.dirname(stage), input.applications);
+        assert.isTrue(NodePath.basename(stage).startsWith("."));
+        NodeFS.copyFileSync(from, to, NodeFS.constants.COPYFILE_EXCL);
+      },
+    });
+    assert.equal(destination, input.appImageFile);
+    assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), NEW_APPIMAGE);
+    assert.deepEqual(NodeFS.readdirSync(input.applications), [name]);
+  });
+
   it("does not follow or remove a pre-existing staging symlink", () => {
     const input = fixture();
     const sentinel = NodePath.join(input.root, "sentinel");
