@@ -130,10 +130,14 @@ function realUpdaterFixture() {
   };
 }
 
-// Passing `logExports` turns on OTLP logs and keeps each exported body there.
-// The collector takes every export, and never replies while `answering` is false.
-function traceLayer(root: string, logExports?: Array<string>, answering = () => true) {
-  const otlpLogs = logExports !== undefined;
+// Each array in `exports` turns on that OTLP signal and keeps every body the
+// collector takes for it. The collector never replies while `answering` is false.
+function traceLayer(
+  root: string,
+  exports: { readonly logs?: Array<string>; readonly traces?: Array<string> } = {},
+  answering = () => true,
+) {
+  const { logs, traces } = exports;
   const environment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/dist-electron",
     homeDirectory: root,
@@ -150,7 +154,8 @@ function traceLayer(root: string, logExports?: Array<string>, answering = () => 
         NodeServices.layer,
         DesktopConfig.layerTest({
           T3CODE_HOME: root,
-          ...(otlpLogs ? { T3CODE_OTLP_LOGS_URL: "http://collector.invalid/v1/logs" } : {}),
+          ...(logs ? { T3CODE_OTLP_LOGS_URL: "http://collector.invalid/v1/logs" } : {}),
+          ...(traces ? { T3CODE_OTLP_TRACES_URL: "http://collector.invalid/v1/traces" } : {}),
         }),
       ),
     ),
@@ -159,13 +164,14 @@ function traceLayer(root: string, logExports?: Array<string>, answering = () => 
     Layer.provideMerge(DesktopObservability.layer.pipe(Layer.provideMerge(environment))),
     Layer.provide(NodeServices.layer),
     Layer.provide(
-      otlpLogs
+      logs || traces
         ? Layer.succeed(
             HttpClient.HttpClient,
             HttpClient.make((request) =>
               Effect.suspend(() => {
+                const received = request.url.endsWith("/v1/traces") ? traces : logs;
                 if (request.body._tag === "Uint8Array") {
-                  logExports.push(new TextDecoder().decode(request.body.body));
+                  received?.push(new TextDecoder().decode(request.body.body));
                 }
                 return answering()
                   ? Effect.succeed(
@@ -256,18 +262,18 @@ describe("ElectronUpdater", () => {
     // Runs the real install with the explicit-quit flags, then the adapter quit.
     // The dependency's intervening Electron event needs a packaged app.
     // Returns the trace file as it was when the original quit ran, and the
-    // OTLP log exports as they were when the update launched. Production
-    // closes no scope before either, so neither does this.
+    // OTLP exports as they were when the update launched. Production closes
+    // no scope before either, so neither does this.
     const traceAtQuit = (
       input: ReturnType<typeof realUpdaterFixture>,
-      logExports: ReadonlyArray<string> = [],
+      collector: { readonly logs: ReadonlyArray<string>; readonly traces: ReadonlyArray<string> },
     ) =>
       Effect.gen(function* () {
         const updater = yield* ElectronUpdater.ElectronUpdater;
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
         const originalQuit = input.adapter.quit;
         let trace = "";
-        let exported: ReadonlyArray<string> = [];
+        let exported = { logs: [...collector.logs], traces: [...collector.traces] };
         let finish = () => {};
         const quit = new Promise<void>((resolve) => {
           finish = resolve;
@@ -278,7 +284,7 @@ describe("ElectronUpdater", () => {
           finish();
         });
         vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
-          exported = [...logExports];
+          exported = { logs: [...collector.logs], traces: [...collector.traces] };
           return Promise.resolve(true);
         });
         yield* updater.setAutoDownload(false);
@@ -289,14 +295,28 @@ describe("ElectronUpdater", () => {
         return { trace, exported };
       });
 
-    it.effect.each([false, true])(
-      "persists the install records before the adapter quits (OTLP logs %s)",
-      (otlpLogs) => {
+    it.effect.each([
+      { logs: false, traces: false },
+      { logs: true, traces: false },
+      { logs: false, traces: true },
+      { logs: true, traces: true },
+    ])(
+      "persists the install records before the adapter quits (OTLP logs $logs, traces $traces)",
+      (otlp) => {
         const input = realUpdaterFixture();
         const logExports: Array<string> = [];
+        const traceExports: Array<string> = [];
         return Effect.gen(function* () {
-          const { trace: persisted, exported } = yield* traceAtQuit(input, logExports).pipe(
-            Effect.provide(traceLayer(input.root, otlpLogs ? logExports : undefined)),
+          const { trace: persisted, exported } = yield* traceAtQuit(input, {
+            logs: logExports,
+            traces: traceExports,
+          }).pipe(
+            Effect.provide(
+              traceLayer(input.root, {
+                ...(otlp.logs ? { logs: logExports } : {}),
+                ...(otlp.traces ? { traces: traceExports } : {}),
+              }),
+            ),
           );
           const spans = updaterSpans(persisted);
           assert.isNotEmpty(spans);
@@ -306,22 +326,33 @@ describe("ElectronUpdater", () => {
             assert.notProperty(span.attributes, "message");
             assert.notInclude(JSON.stringify(span.attributes), "AppImage update");
           }
+          // Spans reach a trace collector before the launch. With logs on
+          // too, the same drain sends both exporters.
+          assert.equal(
+            exported.traces.some((body) => body.includes("desktop.updater")),
+            otlp.traces,
+          );
           const events = spans.flatMap((span) => span.events.map((event) => event.name));
           for (const record of [
             "AppImage update stage started",
             "AppImage update verified",
             "AppImage update committed",
           ]) {
-            // The span event logger writes the text to the trace. An OTLP
-            // logger takes that job, and the trace stops carrying it.
+            // The span event logger writes the text to the trace, and a trace
+            // collector gets it with the spans. An OTLP logger takes that job,
+            // and the spans stop carrying it.
             assert.equal(
               events.some((name) => name.startsWith(record)),
-              !otlpLogs,
+              !otlp.logs,
             );
-            assert.equal(persisted.includes(record), !otlpLogs);
+            assert.equal(persisted.includes(record), !otlp.logs);
             assert.equal(
-              exported.some((body) => body.includes(record)),
-              otlpLogs,
+              exported.logs.some((body) => body.includes(record)),
+              otlp.logs,
+            );
+            assert.equal(
+              exported.traces.some((body) => body.includes(record)),
+              otlp.traces && !otlp.logs,
             );
           }
           assert.equal(NodeFS.readFileSync(input.appImageFile, "utf8"), input.update);
@@ -489,7 +520,7 @@ describe("ElectronUpdater", () => {
             answering = true;
           }),
         ),
-        Effect.provide(traceLayer(input.root, logExports, () => answering)),
+        Effect.provide(traceLayer(input.root, { logs: logExports }, () => answering)),
       );
     });
   });

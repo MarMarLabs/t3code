@@ -35,7 +35,7 @@ const DESKTOP_LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const DESKTOP_LOG_FILE_MAX_FILES = 10;
 const DESKTOP_BACKEND_CHILD_LOG_FIBER_ID = "#backend-child";
 const DESKTOP_TRACE_BATCH_WINDOW_MS = 1_000;
-const DESKTOP_OTLP_LOG_DRAIN_TIMEOUT_MS = 2_000;
+const DESKTOP_OTLP_DRAIN_TIMEOUT_MS = 2_000;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_BYTES = 1024 * 1024;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_CHUNKS = 256;
 
@@ -708,17 +708,18 @@ const layerTelemetry = Layer.unwrap(
           sink,
           ...(delegate ? { delegate } : {}),
         });
-        // With a logs endpoint, log records leave only through the OTLP
-        // exporter, which sends on its interval or when the scope closes.
-        // Drain it after the trace file, and bound the wait so a collector
-        // that does not answer cannot hold up an update.
+        // Log records and spans reach a collector only through the OTLP
+        // exporters, which send on their interval or when the scope closes.
+        // When either endpoint is set, drain them after the trace file, and
+        // bound the wait so a collector that does not answer cannot hold up
+        // an update.
         const otlpFlusher = yield* OtlpExporter.Flusher;
         const flush =
-          endpoints.logs === undefined
+          endpoints.logs === undefined && endpoints.traces === undefined
             ? sink.flush
             : sink.flush.pipe(
                 Effect.andThen(
-                  otlpFlusher.flush.pipe(Effect.timeoutOption(DESKTOP_OTLP_LOG_DRAIN_TIMEOUT_MS)),
+                  otlpFlusher.flush.pipe(Effect.timeoutOption(DESKTOP_OTLP_DRAIN_TIMEOUT_MS)),
                 ),
                 Effect.asVoid,
               );
