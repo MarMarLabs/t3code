@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as TestClock from "effect/testing/TestClock";
 import { AppImageUpdater } from "electron-updater";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -130,7 +131,8 @@ function realUpdaterFixture() {
 }
 
 // Passing `logExports` turns on OTLP logs and keeps each exported body there.
-function traceLayer(root: string, logExports?: Array<string>) {
+// The collector takes every export, and never replies while `answering` is false.
+function traceLayer(root: string, logExports?: Array<string>, answering = () => true) {
   const otlpLogs = logExports !== undefined;
   const environment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/dist-electron",
@@ -161,11 +163,15 @@ function traceLayer(root: string, logExports?: Array<string>) {
         ? Layer.succeed(
             HttpClient.HttpClient,
             HttpClient.make((request) =>
-              Effect.sync(() => {
+              Effect.suspend(() => {
                 if (request.body._tag === "Uint8Array") {
                   logExports.push(new TextDecoder().decode(request.body.body));
                 }
-                return HttpClientResponse.fromWeb(request, new Response(null, { status: 200 }));
+                return answering()
+                  ? Effect.succeed(
+                      HttpClientResponse.fromWeb(request, new Response(null, { status: 200 })),
+                    )
+                  : Effect.never;
               }),
             ),
           )
@@ -249,13 +255,19 @@ describe("ElectronUpdater", () => {
 
     // Runs the real install with the explicit-quit flags, then the adapter quit.
     // The dependency's intervening Electron event needs a packaged app.
-    // Returns the trace file as it was when the original quit ran.
-    const traceAtQuit = (input: ReturnType<typeof realUpdaterFixture>) =>
+    // Returns the trace file as it was when the original quit ran, and the
+    // OTLP log exports as they were when the update launched. Production
+    // closes no scope before either, so neither does this.
+    const traceAtQuit = (
+      input: ReturnType<typeof realUpdaterFixture>,
+      logExports: ReadonlyArray<string> = [],
+    ) =>
       Effect.gen(function* () {
         const updater = yield* ElectronUpdater.ElectronUpdater;
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
         const originalQuit = input.adapter.quit;
         let trace = "";
+        let exported: ReadonlyArray<string> = [];
         let finish = () => {};
         const quit = new Promise<void>((resolve) => {
           finish = resolve;
@@ -265,13 +277,16 @@ describe("ElectronUpdater", () => {
           trace = NodeFS.existsSync(tracePath) ? NodeFS.readFileSync(tracePath, "utf8") : "";
           finish();
         });
-        vi.spyOn(input.updater, "spawnLog").mockResolvedValue(true);
+        vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
+          exported = [...logExports];
+          return Promise.resolve(true);
+        });
         yield* updater.setAutoDownload(false);
         assert.isTrue(input.updater.install(true, true));
         input.adapter.quit();
         yield* Effect.promise(() => quit);
         assert.equal(originalQuit.mock.calls.length, 1);
-        return trace;
+        return { trace, exported };
       });
 
     it.effect.each([false, true])(
@@ -280,8 +295,7 @@ describe("ElectronUpdater", () => {
         const input = realUpdaterFixture();
         const logExports: Array<string> = [];
         return Effect.gen(function* () {
-          // Closing the layer scope drains the OTLP log exporter.
-          const persisted = yield* traceAtQuit(input).pipe(
+          const { trace: persisted, exported } = yield* traceAtQuit(input, logExports).pipe(
             Effect.provide(traceLayer(input.root, otlpLogs ? logExports : undefined)),
           );
           const spans = updaterSpans(persisted);
@@ -306,7 +320,7 @@ describe("ElectronUpdater", () => {
             );
             assert.equal(persisted.includes(record), !otlpLogs);
             assert.equal(
-              logExports.some((body) => body.includes(record)),
+              exported.some((body) => body.includes(record)),
               otlpLogs,
             );
           }
@@ -428,6 +442,54 @@ describe("ElectronUpdater", () => {
         Effect.provide(
           ElectronUpdater.layer.pipe(Layer.provide(Layer.succeed(DesktopTraceFlush, { flush }))),
         ),
+      );
+    });
+
+    it.effect("waits a bounded time for a log collector that never answers", () => {
+      const input = realUpdaterFixture();
+      const logExports: Array<string> = [];
+      const steps: Array<string> = [];
+      let answering = false;
+      vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
+        steps.push("launch");
+        return Promise.resolve(true);
+      });
+      input.adapter.quit.mockImplementation(() => {
+        steps.push("quit");
+      });
+      return Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const tracePath = NodePath.join(environment.logDir, "desktop.trace.ndjson");
+        yield* updater.setAutoDownload(false);
+        assert.isTrue(input.updater.install(true, true));
+        input.adapter.quit();
+        // The test clock holds the bound, so the file write and the export
+        // are awaited in real time.
+        yield* Effect.promise(() =>
+          vi.waitFor(
+            () => {
+              assert.include(NodeFS.readFileSync(tracePath, "utf8"), "desktop.updater");
+              assert.lengthOf(logExports, 1);
+            },
+            { timeout: 5_000 },
+          ),
+        );
+        yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+        assert.include(logExports[0], "AppImage update committed");
+        assert.deepEqual(steps, []);
+        yield* TestClock.adjust("2 seconds");
+        yield* Effect.promise(() =>
+          vi.waitFor(() => assert.deepEqual(steps, ["launch", "quit"]), { timeout: 5_000 }),
+        );
+      }).pipe(
+        // The scope's own final export must not wait on the test clock.
+        Effect.ensuring(
+          Effect.sync(() => {
+            answering = true;
+          }),
+        ),
+        Effect.provide(traceLayer(input.root, logExports, () => answering)),
       );
     });
   });

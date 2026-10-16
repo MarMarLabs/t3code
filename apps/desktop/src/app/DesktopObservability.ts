@@ -35,6 +35,7 @@ const DESKTOP_LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const DESKTOP_LOG_FILE_MAX_FILES = 10;
 const DESKTOP_BACKEND_CHILD_LOG_FIBER_ID = "#backend-child";
 const DESKTOP_TRACE_BATCH_WINDOW_MS = 1_000;
+const DESKTOP_OTLP_LOG_DRAIN_TIMEOUT_MS = 2_000;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_BYTES = 1024 * 1024;
 const DESKTOP_BACKEND_OUTPUT_BUFFER_MAX_CHUNKS = 256;
 
@@ -707,10 +708,24 @@ const layerTelemetry = Layer.unwrap(
           sink,
           ...(delegate ? { delegate } : {}),
         });
+        // With a logs endpoint, log records leave only through the OTLP
+        // exporter, which sends on its interval or when the scope closes.
+        // Drain it after the trace file, and bound the wait so a collector
+        // that does not answer cannot hold up an update.
+        const otlpFlusher = yield* OtlpExporter.Flusher;
+        const flush =
+          endpoints.logs === undefined
+            ? sink.flush
+            : sink.flush.pipe(
+                Effect.andThen(
+                  otlpFlusher.flush.pipe(Effect.timeoutOption(DESKTOP_OTLP_LOG_DRAIN_TIMEOUT_MS)),
+                ),
+                Effect.asVoid,
+              );
 
         return Layer.mergeAll(
           Layer.succeed(Tracer.Tracer, tracer),
-          Layer.succeed(DesktopTraceFlush, { flush: sink.flush }),
+          Layer.succeed(DesktopTraceFlush, { flush }),
         );
       }),
     ).pipe(Layer.provide(OtlpExporter.layerFlusher));
