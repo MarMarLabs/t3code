@@ -231,6 +231,29 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("installAppImag
     assert.equal(NodeFS.readFileSync(destination, "utf8"), NEW_APPIMAGE);
   });
 
+  // A bind mount needs privileges. A macOS firmlink is the same kind of alias,
+  // one directory entry under two paths that realpath keeps apart.
+  it.skipIf(!NodeFS.existsSync("/System/Volumes/Data/private"))(
+    "keeps the destination when the cache reaches it through a mount alias",
+    () => {
+      const input = fixture("T3-Code-1.2.2-x86_64.AppImage");
+      const alias = NodePath.join("/System/Volumes/Data", NodeFS.realpathSync(input.applications));
+      const installerPath = NodePath.join(alias, NodePath.basename(input.installerPath));
+      NodeFS.renameSync(input.installerPath, installerPath);
+      const entry = NodePath.join(input.applications, NodePath.basename(installerPath));
+      assert.notEqual(NodeFS.realpathSync(installerPath), NodeFS.realpathSync(entry));
+      assert.equal(NodeFS.statSync(installerPath).ino, NodeFS.statSync(entry).ino);
+      const destination = installAppImageUpdate({
+        ...input,
+        installerPath,
+        sha512: sha512(NEW_APPIMAGE),
+      });
+      assert.equal(destination, entry);
+      assert.equal(NodeFS.readFileSync(destination, "utf8"), NEW_APPIMAGE);
+      assert.isFalse(NodeFS.existsSync(input.appImageFile));
+    },
+  );
+
   it("rejects an empty source even when its digest matches", () => {
     const input = fixture();
     NodeFS.writeFileSync(input.installerPath, "");

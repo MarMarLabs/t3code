@@ -70,8 +70,14 @@ export function installAppImageUpdate(input: {
   const staged = NodePath.join(stageDirectory, "update.AppImage");
   const cleanup = (path: string, directory = false) => {
     try {
-      // realpath also covers a cache reached through a symlinked directory.
-      if (!directory && NodeFS.realpathSync(path) === NodeFS.realpathSync(destination)) return;
+      // The same device and inode is the installed file, whether the path
+      // reaches it through a symlinked directory or a mount alias such as a
+      // bind mount, which realpath does not resolve.
+      if (!directory) {
+        const file = NodeFS.statSync(path, { bigint: true });
+        const installed = NodeFS.statSync(destination, { bigint: true });
+        if (file.dev === installed.dev && file.ino === installed.ino) return;
+      }
       NodeFS.rmSync(path, { force: true, recursive: directory });
     } catch (error) {
       input.logger?.warn(
