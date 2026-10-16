@@ -395,6 +395,41 @@ describe("ElectronUpdater", () => {
         ),
       );
     });
+
+    it.effect("drains the records before it quits when nothing was launched", () => {
+      const input = realUpdaterFixture();
+      const steps: Array<string> = [];
+      let drain = () => {};
+      const draining = new Promise<void>((resolve) => {
+        drain = resolve;
+      });
+      let finish = () => {};
+      const quit = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      input.adapter.quit.mockImplementation(() => {
+        steps.push("quit");
+        finish();
+      });
+      const flush = Effect.sync(() => steps.push("flush started")).pipe(
+        Effect.andThen(Effect.promise(() => draining)),
+        Effect.andThen(Effect.sync(() => steps.push("flush done"))),
+      );
+      return Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        yield* updater.setAutoDownload(false);
+        input.adapter.quit();
+        yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+        assert.deepEqual(steps, ["flush started"]);
+        drain();
+        yield* Effect.promise(() => quit);
+        assert.deepEqual(steps, ["flush started", "flush done", "quit"]);
+      }).pipe(
+        Effect.provide(
+          ElectronUpdater.layer.pipe(Layer.provide(Layer.succeed(DesktopTraceFlush, { flush }))),
+        ),
+      );
+    });
   });
 
   it.effect("scopes updater event listeners", () =>
