@@ -265,8 +265,8 @@ describe("ElectronUpdater", () => {
           trace = NodeFS.existsSync(tracePath) ? NodeFS.readFileSync(tracePath, "utf8") : "";
           finish();
         });
-        yield* updater.setAutoDownload(false);
         vi.spyOn(input.updater, "spawnLog").mockResolvedValue(true);
+        yield* updater.setAutoDownload(false);
         assert.isTrue(input.updater.install(true, true));
         input.adapter.quit();
         yield* Effect.promise(() => quit);
@@ -352,6 +352,48 @@ describe("ElectronUpdater", () => {
         assert.lengthOf(input.errors, 1);
         assert.equal(originalQuit.mock.calls.length, 0);
       }).pipe(Effect.provide(traceLayer(input.root)));
+    });
+
+    // The new AppImage takes the single-instance lock on start. If it starts
+    // while this process still holds the lock, it exits as a second instance.
+    it.effect("drains the records before it launches the update, then quits at once", () => {
+      const input = realUpdaterFixture();
+      const steps: Array<string> = [];
+      let drain = () => {};
+      const draining = new Promise<void>((resolve) => {
+        drain = resolve;
+      });
+      let finish = () => {};
+      const quit = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      vi.spyOn(input.updater, "spawnLog").mockImplementation(() => {
+        steps.push("launch");
+        return Promise.resolve(true);
+      });
+      input.adapter.quit.mockImplementation(() => {
+        steps.push("quit");
+        finish();
+      });
+      const flush = Effect.sync(() => steps.push("flush started")).pipe(
+        Effect.andThen(Effect.promise(() => draining)),
+        Effect.andThen(Effect.sync(() => steps.push("flush done"))),
+      );
+      return Effect.gen(function* () {
+        const updater = yield* ElectronUpdater.ElectronUpdater;
+        yield* updater.setAutoDownload(false);
+        assert.isTrue(input.updater.install(true, true));
+        input.adapter.quit();
+        yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+        assert.deepEqual(steps, ["flush started"]);
+        drain();
+        yield* Effect.promise(() => quit);
+        assert.deepEqual(steps, ["flush started", "flush done", "launch", "quit"]);
+      }).pipe(
+        Effect.provide(
+          ElectronUpdater.layer.pipe(Layer.provide(Layer.succeed(DesktopTraceFlush, { flush }))),
+        ),
+      );
     });
   });
 

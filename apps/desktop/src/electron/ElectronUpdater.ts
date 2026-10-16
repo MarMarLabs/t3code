@@ -234,15 +234,29 @@ export const layer = Layer.effect(
         // Keep the verified installer for the process lifetime. Scope release
         // must not make a later install fall back to the destructive installer.
         verifyAppImageInstalls(instance);
-        const adapter = (instance as unknown as { app: { quit(): void } }).app;
+        const internals = instance as unknown as {
+          app: { quit(): void };
+          spawnLog(...args: Array<unknown>): Promise<boolean>;
+        };
+        const adapter = internals.app;
         const previousQuit = adapter.quit;
-        // Explicit quitAndInstall schedules this call immediately after the
-        // synchronous install. Drain its records before Electron can exit.
+        const previousSpawnLog = internals.spawnLog;
+        // Explicit quitAndInstall launches the new AppImage during the
+        // synchronous install, then schedules this quit. The new app exits if
+        // this one still holds the single-instance lock, so drain the install
+        // records before the launch and quit right after it.
+        let drained: Promise<void> | undefined;
+        internals.spawnLog = function (...args) {
+          const launch = () => previousSpawnLog.apply(this, args);
+          drained = runPromise(flush);
+          return drained.then(launch, launch);
+        };
         adapter.quit = function () {
-          void runPromise(flush).finally(() => previousQuit.call(this));
+          void (drained ?? runPromise(flush)).finally(() => previousQuit.call(this));
         };
         restoreAdapter = () => {
           adapter.quit = previousQuit;
+          internals.spawnLog = previousSpawnLog;
         };
       }
       restore = () => {
