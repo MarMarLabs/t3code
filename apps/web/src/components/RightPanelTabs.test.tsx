@@ -58,6 +58,10 @@ describe("surface shortcuts", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0e34", { code: "KeyB" }))).toBe(
       actions[0],
     );
+    // Arabic (101) layout: the B key types lam alef "\u0644\u0627", two code points.
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u0644\u0627", { code: "KeyB" })),
+    ).toBe(actions[0]);
   });
 
   it("follows the typed letter on Latin layouts that move it", () => {

@@ -254,12 +254,13 @@ export function surfaceShortcutActionForKey<
   if (event.defaultPrevented || event.isComposing) return null;
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   const typed = event.key.toLowerCase();
-  // A layout that types a non-Latin letter or combining mark matches by
-  // physical key, like the modified shortcuts in keybindings.ts. Any other
-  // key, such as an accented Latin letter, punctuation or a dead key, matches
-  // only what it types.
+  // A layout that types non-Latin letters or combining marks matches by
+  // physical key, like the modified shortcuts in keybindings.ts. One key can
+  // type several, such as the Arabic lam alef ligature. Any other key, such as
+  // an accented Latin letter, punctuation or a dead key, matches only what it
+  // types.
   const physical =
-    /^[\p{L}\p{M}]$/u.test(typed) && !/\p{Script=Latin}/u.test(typed)
+    /^[\p{L}\p{M}]+$/u.test(typed) && !/\p{Script=Latin}/u.test(typed)
       ? event.code?.match(/^Key([A-Z])$/)?.[1]?.toLowerCase()
       : undefined;
   return (
