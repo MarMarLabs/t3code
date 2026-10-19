@@ -49,10 +49,7 @@ function onUnhandledRejection(reason: unknown): void {
     return;
   }
   if (isCursorClosedStreamWrite(reason)) {
-    console.error(
-      "Cursor SDK wrote to a closed exec stream. The server will keep running.",
-      reason,
-    );
+    console.error("Cursor SDK wrote to a closed exec stream. The server will keep running.");
     return;
   }
   if (process.listenerCount("unhandledRejection") > 1) {

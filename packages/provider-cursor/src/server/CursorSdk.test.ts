@@ -192,7 +192,7 @@ describe("Cursor shell spawn guard", () => {
     const result = await runProbe("cursor-closed-write");
     expect(result.code).toBe(0);
     expect(result.stderr).toContain("The server will keep running.");
-    expect(result.stderr).toContain("WritableIterable is closed");
+    expect(result.stderr).not.toContain("WritableIterable is closed");
   });
 
   it("still exits when a different spawn failure is unhandled", async () => {
