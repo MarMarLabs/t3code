@@ -221,3 +221,14 @@ describe("right panel new-tab shortcut", () => {
     expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
   });
 });
+
+describe("right panel launcher letters", () => {
+  it("opens a surface from the physical key when the layout types a non-Latin letter", async () => {
+    const addTerminal = vi.fn();
+    await renderPanel({ terminalAvailable: true, onAddTerminal: addTerminal });
+    // Ukrainian layout: the T key types "е".
+    const event = await press("\u0435", { code: "KeyT" });
+    expect(event.defaultPrevented).toBe(true);
+    expect(addTerminal).toHaveBeenCalledOnce();
+  });
+});

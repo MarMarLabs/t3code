@@ -43,8 +43,33 @@ describe("surface shortcuts", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("B"))).toBe(actions[0]);
   });
 
+  it("falls back to the physical key when the layout types a non-Latin letter", () => {
+    // Ukrainian layout: the B key types "и".
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0438", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+    // Greek layout: the B key types "β".
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u03b2", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+  });
+
+  it("follows the typed letter on Latin layouts that move it", () => {
+    // Dvorak: the key at QWERTY B types "x", and "b" sits on QWERTY N.
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("x", { code: "KeyB" }))).toBeNull();
+    // The same key with Shift or Caps Lock types "X".
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("X", { code: "KeyB" }))).toBeNull();
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("b", { code: "KeyN" }))).toBe(
+      actions[0],
+    );
+  });
+
   it("does not activate unavailable surfaces", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("d"))).toBeNull();
+    // Ukrainian layout: the D key types "в".
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u0432", { code: "KeyD" })),
+    ).toBeNull();
   });
 
   it("leaves modified, composing, and already-handled key events alone", () => {

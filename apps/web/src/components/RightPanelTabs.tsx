@@ -245,17 +245,26 @@ function tabAudioState(overlay: DesktopPreviewOverlay | null): TabAudioState {
 type SurfaceShortcutEvent = Pick<
   KeyboardEvent,
   "altKey" | "ctrlKey" | "defaultPrevented" | "isComposing" | "key" | "metaKey"
->;
+> &
+  Partial<Pick<KeyboardEvent, "code">>;
 
 export function surfaceShortcutActionForKey<
   const Action extends { available: boolean; shortcut: string },
 >(actions: readonly Action[], event: SurfaceShortcutEvent): Action | null {
   if (event.defaultPrevented || event.isComposing) return null;
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  const typed = event.key.toLowerCase();
+  // A layout that types a non-Latin letter matches by physical key, like the
+  // modified shortcuts in keybindings.ts. Latin layouts keep the typed letter.
+  const physical = /^[a-z]$/.test(typed)
+    ? undefined
+    : event.code?.match(/^Key([A-Z])$/)?.[1]?.toLowerCase();
   return (
-    actions.find(
-      (action) => action.available && action.shortcut.toLowerCase() === event.key.toLowerCase(),
-    ) ?? null
+    actions.find((action) => {
+      if (!action.available) return false;
+      const shortcut = action.shortcut.toLowerCase();
+      return shortcut === typed || shortcut === physical;
+    }) ?? null
   );
 }
 
