@@ -110,6 +110,21 @@ describe("surface shortcuts", () => {
       surfaceShortcutActionForKey(actions, shortcutEvent("b", { defaultPrevented: true })),
     ).toBeNull();
   });
+
+  it("leaves AltGr text alone unless it is a plain letter", () => {
+    const getModifierState = (key: string) => key === "AltGraph";
+    // German layout: AltGr+M types "\u00b5" and sets only AltGraph on Linux and Windows.
+    expect(
+      surfaceShortcutActionForKey(
+        actions,
+        shortcutEvent("\u00b5", { code: "KeyM", getModifierState }),
+      ),
+    ).toBeNull();
+    // Finnish layout: AltGr+B types "b", which still matches, as it does in keybindings.ts.
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("b", { code: "KeyB", getModifierState })),
+    ).toBe(actions[0]);
+  });
 });
 
 describe("surface shortcut typing contexts", () => {
