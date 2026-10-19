@@ -2,7 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "vite-plus/test";
 
-import { isCursorShellSpawnFailure } from "./CursorSdk.ts";
+import { isCursorClosedStreamWrite, isCursorShellSpawnFailure } from "./CursorSdk.ts";
 
 const cursorSdkUrl = new URL("./CursorSdk.ts", import.meta.url).href;
 
@@ -68,6 +68,16 @@ if (mode === "cursor-shell") {
       spawnargs: ["status"],
     }),
   );
+  setTimeout(() => process.exit(0), 500);
+} else if (mode === "cursor-closed-write") {
+  // Shaped like the SDK's minified class: the constructor is not named after the error.
+  class o extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "WriteIterableClosedError";
+    }
+  }
+  Promise.reject(new o("WritableIterable is closed"));
   setTimeout(() => process.exit(0), 500);
 } else if (mode === "other-rejection") {
   Promise.reject(new Error("boom"));
@@ -146,12 +156,43 @@ describe("isCursorShellSpawnFailure", () => {
   });
 });
 
+describe("isCursorClosedStreamWrite", () => {
+  it("matches only the SDK's closed stream write error", () => {
+    class o extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = "WriteIterableClosedError";
+      }
+    }
+    expect(isCursorClosedStreamWrite(new o("WritableIterable is closed"))).toBe(true);
+    expect(isCursorClosedStreamWrite(new Error("WritableIterable is closed"))).toBe(false);
+    expect(isCursorClosedStreamWrite(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe(
+      false,
+    );
+    expect(isCursorClosedStreamWrite(new TypeError("x"))).toBe(false);
+    expect(
+      isCursorClosedStreamWrite(
+        Object.assign(new Error("x"), { name: "WriteIterableClosedErrorX" }),
+      ),
+    ).toBe(false);
+    expect(isCursorClosedStreamWrite({ name: "WriteIterableClosedError" })).toBe(false);
+    expect(isCursorClosedStreamWrite("WriteIterableClosedError")).toBe(false);
+  });
+});
+
 describe("Cursor shell spawn guard", () => {
   it("keeps the process alive when Cursor's shell spawn rejects", async () => {
     const result = await runProbe("cursor-shell");
     expect(result.code).toBe(0);
     expect(result.stderr).toContain("The server will keep running.");
     expect(result.stderr).toContain("ENOENT");
+  });
+
+  it("keeps the process alive when the SDK writes to a closed stream", async () => {
+    const result = await runProbe("cursor-closed-write");
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("The server will keep running.");
+    expect(result.stderr).toContain("WritableIterable is closed");
   });
 
   it("still exits when a different spawn failure is unhandled", async () => {
