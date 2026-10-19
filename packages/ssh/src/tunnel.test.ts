@@ -1,9 +1,6 @@
 import * as NodeNet from "node:net";
 
 import { assert, describe, it } from "@effect/vitest";
-import { afterAll } from "vite-plus/test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - the executed suite runs the generated launch script through a real POSIX shell.
-import * as NodeChildProcess from "node:child_process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -1056,12 +1053,12 @@ describe("remote port picker", () => {
   );
 });
 
-const runScript = (home: string, args: ReadonlyArray<string>) =>
+const runScript = (home: string, args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const child = yield* spawner.spawn(
       ChildProcess.make("sh", args, {
-        env: { PATH: process.env.PATH ?? "", HOME: home },
+        env: { PATH: process.env.PATH ?? "", HOME: home, ...env },
         extendEnv: false,
       }),
     );
@@ -1295,6 +1292,7 @@ server.listen(Number(flag("--port")), "127.0.0.1", () => {
       home,
       stateDir,
       launch,
+      fakeServer,
       readManagedPid,
       runLaunchScript,
       runLaunch,
@@ -1333,6 +1331,119 @@ server.listen(Number(flag("--port")), "127.0.0.1", () => {
         assert.isFalse(yield* fs.exists(`${stateDir}/pid`));
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "reports a silent launch with a fresh log isolated from a lingering writer",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { home, stateDir, launch, fakeServer } = yield* prepareLaunch;
+        const log = `${stateDir}/server.log`;
+        yield* fs.writeFileString(log, "STALE_PREVIOUS_RUN\n");
+        const oldWriter = yield* fs.open(log, { flag: "a" });
+        yield* fs.makeDirectory(`${home}/bin`);
+        assert.equal((yield* runScript(home, ["-c", 'mkfifo "$HOME/silent"'])).exitCode, 0);
+        yield* fs.writeFileString(
+          fakeServer,
+          `require("node:fs").writeFileSync(${JSON.stringify(`${home}/silent`)}, "done\\n");`,
+        );
+        // Readiness fails only after the silent CLI has opened its redirected log.
+        yield* fs.writeFileString(
+          `${home}/bin/node`,
+          `#!/bin/sh
+if [ "\${3-}" = "60000" ]; then
+  read -r done < "$HOME/silent"
+  exit 1
+fi
+exec "$REAL_NODE" "$@"
+`,
+        );
+        yield* fs.chmod(`${home}/bin/node`, 0o700);
+        const result = yield* runScript(home, [launch, "test-state"], {
+          PATH: `${home}/bin:${process.env.PATH ?? ""}`,
+          REAL_NODE: process.execPath,
+        });
+        assert.equal(result.exitCode, 1, result.stderr);
+        assert.include(result.stderr, "It wrote nothing to");
+        assert.notInclude(result.stderr, "STALE_PREVIOUS_RUN");
+        // A survivor can still append after the replacement has finished launching.
+        yield* oldWriter.writeAll(new TextEncoder().encode("LATE_OLD_OUTPUT\n"));
+        assert.equal(yield* fs.readFileString(log), "");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "keeps the first server log when concurrent launchers share a state key and then reuse it",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { home, stateDir, launch, readManagedPid, runLaunch } = yield* prepareLaunch;
+        assert.equal(
+          (yield* runScript(home, ["-c", 'mkfifo "$HOME/entered" "$HOME/start" "$HOME/continue"']))
+            .exitCode,
+          0,
+        );
+        yield* fs.makeDirectory(`${home}/first-bin`);
+        yield* fs.makeDirectory(`${home}/second-bin`);
+        yield* fs.writeFileString(
+          `${home}/first-bin/node`,
+          `#!/bin/sh
+case "\${2-}" in
+  */port) echo entered > "$HOME/entered"; read -r start < "$HOME/start" ;;
+esac
+exec "$REAL_NODE" "$@"
+`,
+        );
+        // The contender either reaches port selection with stale ownership, or
+        // waits for the remote launch lock. Both release the first launcher.
+        const contender = `#!/bin/sh
+case "$0:\${2-}" in
+  */sleep:*|*/node:*/port)
+    if mkdir "$HOME/released" 2>/dev/null; then
+      echo start > "$HOME/start"
+      read -r continue < "$HOME/continue"
+    fi ;;
+esac
+case "$0" in
+  */node) exec "$REAL_NODE" "$@" ;;
+  */sleep) exec "$REAL_SLEEP" "$@" ;;
+esac
+`;
+        yield* fs.writeFileString(`${home}/second-bin/node`, contender);
+        yield* fs.writeFileString(`${home}/second-bin/sleep`, contender);
+        for (const file of ["first-bin/node", "second-bin/node", "second-bin/sleep"]) {
+          yield* fs.chmod(`${home}/${file}`, 0o700);
+        }
+        const realSleep = (yield* runScript(home, ["-c", "command -v sleep"])).stdout.trim();
+        const first = yield* runScript(home, [launch, "test-state"], {
+          PATH: `${home}/first-bin:${process.env.PATH ?? ""}`,
+          REAL_NODE: process.execPath,
+        }).pipe(Effect.forkScoped);
+        yield* fs.readFileString(`${home}/entered`);
+        const second = yield* runScript(home, [launch, "test-state"], {
+          PATH: `${home}/second-bin:${process.env.PATH ?? ""}`,
+          REAL_NODE: process.execPath,
+          REAL_SLEEP: realSleep,
+        }).pipe(Effect.forkScoped);
+        const firstResult = yield* Fiber.join(first);
+        assert.equal(firstResult.exitCode, 0, firstResult.stderr);
+        const firstPid = yield* readManagedPid;
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            if (isAlive(firstPid)) process.kill(firstPid, "SIGKILL");
+          }),
+        );
+        const firstLog = yield* fs.readFileString(`${stateDir}/server.log`);
+        assert.isNotEmpty(firstLog);
+        yield* fs.writeFileString(`${home}/continue`, "continue\n");
+        const secondResult = yield* Fiber.join(second);
+        assert.equal(secondResult.exitCode, 0, secondResult.stderr);
+        assert.include(yield* fs.readFileString(`${stateDir}/server.log`), firstLog);
+        assert.deepEqual(launchResult(secondResult.stdout), launchResult(firstResult.stdout));
+        assert.deepEqual(yield* runLaunch, launchResult(firstResult.stdout));
+        assert.equal(yield* fs.readFileString(`${stateDir}/server.log`), firstLog);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.skipIf(windowsHost)(
@@ -1492,125 +1603,4 @@ server.listen(Number(flag("--port")), "127.0.0.1", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
   );
-});
-
-// The launch script's failure diagnostic only misbehaves when a real shell runs
-// the failure branch against a log left over from a previous run, so the suite
-// below executes the real generated script. Find a shell that has the tools it
-// needs; anywhere else the executed suite skips.
-const REQUIRED_SHELL_TOOLS = ["nohup", "mktemp", "cmp", "tail"] as const;
-
-const posixShellRunner = (() => {
-  // Candidates rather than a platform switch: wsl.exe simply fails to spawn
-  // where it does not exist, which is the same answer as a missing tool.
-  const candidates = [
-    { file: "bash", args: [] as ReadonlyArray<string> },
-    { file: "wsl.exe", args: ["-e", "bash"] as ReadonlyArray<string> },
-  ];
-  const probe = REQUIRED_SHELL_TOOLS.map((tool) => `command -v ${tool} >/dev/null || exit 1`).join(
-    "\n",
-  );
-  return (
-    candidates.find((candidate) => {
-      const result = NodeChildProcess.spawnSync(candidate.file, [...candidate.args, "-c", probe], {
-        encoding: "utf8",
-      });
-      return result.status === 0;
-    }) ?? null
-  );
-})();
-
-const runShell = (script: string, args: ReadonlyArray<string> = []) => {
-  if (posixShellRunner === null) throw new Error("no POSIX shell runner available");
-  // The launch script arrives on stdin with the state key as $1 in production too.
-  const result = NodeChildProcess.spawnSync(
-    posixShellRunner.file,
-    [...posixShellRunner.args, "-s", "--", ...args],
-    { input: script, encoding: "utf8" },
-  );
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-};
-
-const sh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-
-// Reading the generated script proves what it says, not what it does. An
-// append-mode launch satisfied every text assertion and still blamed a silent
-// server's failure on the previous run's log, because [ -s "$LOG_FILE" ] stayed
-// true forever once any run had logged. So run the real script in a throwaway
-// HOME seeded with a stale log, with a fake `node` that picks a port, fails
-// readiness immediately, and lets the runner exit without writing a byte.
-describe.skipIf(posixShellRunner === null)("remote launch script (executed)", () => {
-  const fixtures: Array<string> = [];
-
-  afterAll(() => {
-    for (const work of fixtures) runShell(`set -eu\nrm -rf ${sh(work)}`);
-    fixtures.length = 0;
-  });
-
-  it("reports a silent launch instead of tailing the previous run's log", () => {
-    const setup = runShell(
-      [
-        "set -eu",
-        "work=$(mktemp -d)",
-        'mkdir -p "$work/bin" "$work/home/.t3/ssh-launch/launch-test"',
-        // One fake node serves the launch script's three contracts, told apart
-        // by argv: `node - <state>/port ...` picks a port, `node - <runtime
-        // file>` finds no external server, `node - <ms> ...` probes readiness,
-        // and `node <script> serve ...` is the runner, which must exit silently.
-        "cat > \"$work/bin/node\" <<'T3_FAKE_NODE'",
-        "#!/bin/sh",
-        'case "${2-}" in',
-        "  */server-runtime.json) exit 1 ;;",
-        "  */port) printf '43117'; exit 0 ;;",
-        "esac",
-        '[ "${1-}" = "-" ] && exit 1',
-        "exit 0",
-        "T3_FAKE_NODE",
-        'chmod 700 "$work/bin/node"',
-        "printf 'STALE_PREVIOUS_RUN\\n' > \"$work/home/.t3/ssh-launch/launch-test/server.log\"",
-        "printf 'work:%s\\n' \"$work\"",
-      ].join("\n"),
-    );
-    assert.strictEqual(setup.status, 0, setup.stderr);
-    const workLine = setup.stdout.split("\n").find((line) => line.startsWith("work:"));
-    if (workLine === undefined)
-      throw new Error(`missing work dir in setup output: ${setup.stdout}`);
-    const work = workLine.slice("work:".length).trim();
-    fixtures.push(work);
-
-    const script = SshTunnel.buildRemoteLaunchScript({ nodeScriptPath: `${work}/serve.mjs` });
-    // A missing log passes the byte check below, so this run cannot tell unlinking
-    // before the launch from unlinking after it. Pin the order, which also rules out
-    // truncating in place.
-    assert.include(script, 'rm -f "$LOG_FILE"\n  nohup env ');
-
-    // The script reads $HOME and finds node on $PATH, so the overrides ride in
-    // the script itself, ahead of the generated text.
-    const launch = runShell(
-      [
-        `HOME=${sh(`${work}/home`)}`,
-        "export HOME",
-        `PATH=${sh(`${work}/bin`)}":$PATH"`,
-        "export PATH",
-        script,
-      ].join("\n"),
-      ["launch-test"],
-    );
-
-    assert.strictEqual(launch.status, 1, launch.stderr);
-    assert.include(launch.stderr, "Remote T3 server did not become ready");
-    // The whole point: a launch that wrote nothing must say so, not replay
-    // whatever the previous server left in the log.
-    assert.include(launch.stderr, "It wrote nothing to");
-    assert.notInclude(launch.stderr, "STALE_PREVIOUS_RUN");
-
-    // The background job's shell opens server.log, so a job killed before it got
-    // that far leaves no file. That is as clean as an empty one; only stale bytes fail.
-    const logFile = sh(`${work}/home/.t3/ssh-launch/launch-test/server.log`);
-    const logBytes = runShell(
-      `set -eu\nif [ -e ${logFile} ]; then wc -c < ${logFile}; else echo 0; fi`,
-    );
-    assert.strictEqual(logBytes.status, 0, logBytes.stderr);
-    assert.strictEqual(logBytes.stdout.trim(), "0");
-  });
 });
