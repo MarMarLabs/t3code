@@ -1417,6 +1417,47 @@ exec "$REAL_NODE" "$@"
   );
 
   it.effect.skipIf(windowsHost)(
+    "times out when launch lock creation keeps failing without an owner",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { home, stateDir, launch } = yield* prepareLaunch;
+        yield* fs.remove(`${stateDir}/port`);
+        const bin = `${home}/bin`;
+        yield* fs.makeDirectory(bin);
+        // Simulate the state directory disappearing after mkdir succeeds. Lock
+        // creation then fails even as root, while removing the missing lock succeeds.
+        // Bound the broken loop independently of sleep, which it can skip entirely.
+        for (const [name, script] of Object.entries({
+          mkdir: 'PATH=${PATH#*:}\nmkdir "$@" && rmdir "$2"',
+          sleep: "exit 0",
+          rm: `attempts=0
+if [ -f "$HOME/removals" ]; then read -r attempts < "$HOME/removals"; fi
+attempts=$((attempts + 1))
+echo "$attempts" > "$HOME/removals"
+if [ "$attempts" -gt 100 ]; then
+  echo 'FIXTURE_RETRY_LIMIT_EXHAUSTED' >&2
+  exit 1
+fi
+PATH=\${PATH#*:}
+exec rm "$@"`,
+        })) {
+          yield* fs.writeFileString(`${bin}/${name}`, `#!/bin/sh\n${script}\n`);
+          yield* fs.chmod(`${bin}/${name}`, 0o700);
+        }
+        const result = yield* runScript(home, [launch, "test-state"], {
+          path: `${bin}:${process.env.PATH ?? ""}`,
+        });
+        assert.equal(result.exitCode, 1, result.stderr);
+        assert.include(
+          result.stderr,
+          `Another remote T3 launch has held ${stateDir}/launch.lock for too long.`,
+        );
+        assert.notInclude(result.stderr, "FIXTURE_RETRY_LIMIT_EXHAUSTED");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.skipIf(windowsHost)(
     "keeps the first server log when concurrent launchers share a state key and then reuse it",
     () =>
       Effect.gen(function* () {

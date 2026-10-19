@@ -568,14 +568,12 @@ while ! (set -C; printf '%s\\n' "$$" > "$LAUNCH_LOCK") 2>/dev/null; do
     LOCK_UNOWNED=0
     if ! kill -0 "$LOCK_OWNER" 2>/dev/null; then
       rm -rf "$LAUNCH_LOCK"
-      continue
     fi
   else
     # An empty lock gets a short grace period for its owner to publish a PID.
     LOCK_UNOWNED=$((LOCK_UNOWNED + 1))
     if [ "$LOCK_UNOWNED" -ge 5 ]; then
       rm -rf "$LAUNCH_LOCK"
-      continue
     fi
   fi
   if [ "$LOCK_WAITED" -ge @@T3_LAUNCH_LOCK_WAIT_SECONDS@@ ]; then
