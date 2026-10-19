@@ -36,6 +36,8 @@ describe("surface shortcuts", () => {
   const actions = [
     { shortcut: "B", available: true, label: "Browser" },
     { shortcut: "D", available: false, label: "Diff" },
+    { shortcut: "T", available: true, label: "Terminal" },
+    { shortcut: "M", available: true, label: "Device" },
   ] as const;
 
   it("matches available surface shortcuts case-insensitively", () => {
@@ -43,13 +45,17 @@ describe("surface shortcuts", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("B"))).toBe(actions[0]);
   });
 
-  it("falls back to the physical key when the layout types a non-Latin letter", () => {
+  it("falls back to the physical key when the layout types a non-Latin letter or mark", () => {
     // Ukrainian layout: the B key types "и".
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0438", { code: "KeyB" }))).toBe(
       actions[0],
     );
     // Greek layout: the B key types "β".
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u03b2", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+    // Thai layout: the B key types the vowel sign "\u0e34", a combining mark.
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0e34", { code: "KeyB" }))).toBe(
       actions[0],
     );
   });
@@ -62,6 +68,25 @@ describe("surface shortcuts", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("b", { code: "KeyN" }))).toBe(
       actions[0],
     );
+  });
+
+  it("keeps accented Latin letters typed on a letter key", () => {
+    // Bépo: the T key types "è".
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u00e8", { code: "KeyT" })),
+    ).toBeNull();
+  });
+
+  it("keeps punctuation typed on a letter key", () => {
+    // French AZERTY: the M key types ",".
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent(",", { code: "KeyM" }))).toBeNull();
+  });
+
+  it("keeps a dead key on a letter key", () => {
+    // A dead key starts an accented letter on a Latin layout.
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("Dead", { code: "KeyT" })),
+    ).toBeNull();
   });
 
   it("does not activate unavailable surfaces", () => {
