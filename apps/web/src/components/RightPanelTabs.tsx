@@ -92,7 +92,7 @@ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
-import { surfaceShortcutLetters } from "~/lib/surfaceShortcutLetters";
+import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 
 export interface RightPanelTabsProps {
   mode: PreviewPanelMode;
@@ -247,10 +247,9 @@ export function surfaceShortcutActionForKey<
 >(actions: readonly Action[], event: SurfaceShortcutEvent): Action | null {
   if (event.defaultPrevented || event.isComposing) return null;
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  const letters = surfaceShortcutLetters(event);
+  const key = surfaceShortcutKey(event);
   return (
-    actions.find((action) => action.available && letters.includes(action.shortcut.toLowerCase())) ??
-    null
+    actions.find((action) => action.available && action.shortcut.toLowerCase() === key) ?? null
   );
 }
 

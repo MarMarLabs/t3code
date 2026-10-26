@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { expect, it } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
-import { surfaceShortcutLetters } from "~/lib/surfaceShortcutLetters";
+import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 import { render } from "../../../test/render";
 import type { ChatComposerHandle } from "./ChatComposer";
 import { useChatShortcuts } from "./useChatShortcuts";
@@ -26,8 +26,8 @@ function Launcher(props: { keys: string; received: string[] }) {
   useEffect(() => {
     const claim = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      const keys = props.keys.toLowerCase();
-      if (!surfaceShortcutLetters(event).some((letter) => keys.includes(letter))) return;
+      const key = surfaceShortcutKey(event);
+      if (key === null || !props.keys.toLowerCase().includes(key)) return;
       event.preventDefault();
       props.received.push(event.key);
     };

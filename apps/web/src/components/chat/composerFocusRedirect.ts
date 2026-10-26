@@ -1,4 +1,4 @@
-import { surfaceShortcutLetters } from "~/lib/surfaceShortcutLetters";
+import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 
 export const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -55,10 +55,8 @@ function isSurfaceLauncherKey(event: KeyboardEvent): boolean {
     .querySelector(`[${SURFACE_LAUNCHER_KEYS_ATTRIBUTE}]`)
     ?.getAttribute(SURFACE_LAUNCHER_KEYS_ATTRIBUTE)
     ?.toLowerCase();
-  return (
-    launcherKeys !== undefined &&
-    surfaceShortcutLetters(event).some((letter) => launcherKeys.includes(letter))
-  );
+  const key = surfaceShortcutKey(event);
+  return key !== null && (launcherKeys?.includes(key) ?? false);
 }
 
 export function shouldRedirectInputToComposer(event: Event): boolean {
