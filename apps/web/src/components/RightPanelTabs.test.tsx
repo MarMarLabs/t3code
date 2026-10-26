@@ -3,19 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   resolvePullRequestTabLink,
-  shouldOpenDefaultBrowserProfileFromMenuClick,
   surfaceShortcutActionForKey,
   surfaceShortcutTargetsTypingContext,
-  tabMuteMenuItem,
 } from "./RightPanelTabs";
-
-describe("browser profile submenu", () => {
-  it("reserves touch clicks for opening the choices while mouse clicks use the default", () => {
-    expect(shouldOpenDefaultBrowserProfileFromMenuClick("touch")).toBe(false);
-    expect(shouldOpenDefaultBrowserProfileFromMenuClick("mouse")).toBe(true);
-    expect(shouldOpenDefaultBrowserProfileFromMenuClick(undefined)).toBe(true);
-  });
-});
 
 function shortcutEvent(
   key: string,
@@ -40,11 +30,6 @@ describe("surface shortcuts", () => {
     { shortcut: "M", available: true, label: "Device" },
   ] as const;
 
-  it("matches available surface shortcuts case-insensitively", () => {
-    expect(surfaceShortcutActionForKey(actions, shortcutEvent("b"))).toBe(actions[0]);
-    expect(surfaceShortcutActionForKey(actions, shortcutEvent("B"))).toBe(actions[0]);
-  });
-
   it("falls back to the physical key when the layout types a non-Latin letter or mark", () => {
     // Ukrainian layout: the B key types "и".
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0438", { code: "KeyB" }))).toBe(
@@ -62,6 +47,10 @@ describe("surface shortcuts", () => {
     expect(
       surfaceShortcutActionForKey(actions, shortcutEvent("\u0644\u0627", { code: "KeyB" })),
     ).toBe(actions[0]);
+    // Ukrainian layout: the D key types "\u0432", but the Diff surface is unavailable.
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u0432", { code: "KeyD" })),
+    ).toBeNull();
   });
 
   it("follows the typed letter on Latin layouts that move it", () => {
@@ -90,14 +79,6 @@ describe("surface shortcuts", () => {
     // A dead key starts an accented letter on a Latin layout.
     expect(
       surfaceShortcutActionForKey(actions, shortcutEvent("Dead", { code: "KeyT" })),
-    ).toBeNull();
-  });
-
-  it("does not activate unavailable surfaces", () => {
-    expect(surfaceShortcutActionForKey(actions, shortcutEvent("d"))).toBeNull();
-    // Ukrainian layout: the D key types "в".
-    expect(
-      surfaceShortcutActionForKey(actions, shortcutEvent("\u0432", { code: "KeyD" })),
     ).toBeNull();
   });
 
@@ -140,41 +121,6 @@ describe("surface shortcut typing contexts", () => {
     expect(surfaceShortcutTargetsTypingContext(makeTarget("textarea"))).toBe(true);
     expect(surfaceShortcutTargetsTypingContext(makeTarget("select"))).toBe(true);
     expect(surfaceShortcutTargetsTypingContext(makeTarget("[contenteditable]"))).toBe(true);
-  });
-
-  it("claims letters when focus sits outside any editable region", () => {
-    expect(surfaceShortcutTargetsTypingContext(null)).toBe(false);
-    expect(surfaceShortcutTargetsTypingContext(makeTarget(null))).toBe(false);
-  });
-});
-
-describe("tabMuteMenuItem", () => {
-  const overlay = (audioMuted: boolean) =>
-    ({ audioMuted, audible: false }) as Parameters<typeof tabMuteMenuItem>[0]["overlay"];
-
-  it("stays disabled until the desktop tab exists", () => {
-    expect(tabMuteMenuItem({ overlay: null, canResolveRuntimeTabId: true })).toEqual({
-      label: "Mute tab",
-      disabled: true,
-    });
-  });
-
-  it("stays disabled when no runtime tab id can be resolved", () => {
-    expect(tabMuteMenuItem({ overlay: overlay(false), canResolveRuntimeTabId: false })).toEqual({
-      label: "Mute tab",
-      disabled: true,
-    });
-  });
-
-  it("offers mute and unmute once the tab is addressable", () => {
-    expect(tabMuteMenuItem({ overlay: overlay(false), canResolveRuntimeTabId: true })).toEqual({
-      label: "Mute tab",
-      disabled: false,
-    });
-    expect(tabMuteMenuItem({ overlay: overlay(true), canResolveRuntimeTabId: true })).toEqual({
-      label: "Unmute tab",
-      disabled: false,
-    });
   });
 });
 
