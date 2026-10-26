@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { expect, it } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
+import { surfaceShortcutLetters } from "~/lib/surfaceShortcutLetters";
 import { render } from "../../../test/render";
 import type { ChatComposerHandle } from "./ChatComposer";
 import { useChatShortcuts } from "./useChatShortcuts";
@@ -25,7 +26,8 @@ function Launcher(props: { keys: string; received: string[] }) {
   useEffect(() => {
     const claim = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      if (!props.keys.toLowerCase().split("").includes(event.key.toLowerCase())) return;
+      const keys = props.keys.toLowerCase();
+      if (!surfaceShortcutLetters(event).some((letter) => keys.includes(letter))) return;
       event.preventDefault();
       props.received.push(event.key);
     };
@@ -93,4 +95,23 @@ it("still types other letters into the composer while the launcher is open", asy
 
   expect(composerKeys).toEqual(["a"]);
   expect(received).toEqual([]);
+});
+
+it("leaves a non-Latin launcher letter to the launcher by its physical key", async () => {
+  const composerKeys: string[] = [];
+  const received: string[] = [];
+  await using screen = await render(<Chat composerKeys={composerKeys} />, options);
+  await screen.rerender(<Chat composerKeys={composerKeys} launcher={{ keys: "BT", received }} />);
+
+  // Playwright cannot press a key its US layout lacks, so send what a Ukrainian T key sends.
+  const event = new KeyboardEvent("keydown", {
+    key: "\u0435",
+    code: "KeyT",
+    bubbles: true,
+    cancelable: true,
+  });
+  (document.activeElement ?? document.body).dispatchEvent(event);
+
+  expect(composerKeys).toEqual([]);
+  expect(received).toEqual(["\u0435"]);
 });

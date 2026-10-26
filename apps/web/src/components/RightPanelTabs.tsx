@@ -92,6 +92,7 @@ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
+import { surfaceShortcutLetters } from "~/lib/surfaceShortcutLetters";
 
 export interface RightPanelTabsProps {
   mode: PreviewPanelMode;
@@ -246,26 +247,10 @@ export function surfaceShortcutActionForKey<
 >(actions: readonly Action[], event: SurfaceShortcutEvent): Action | null {
   if (event.defaultPrevented || event.isComposing) return null;
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  // Linux and Windows report AltGr as AltGraph without Ctrl or Alt, which the
-  // check above misses, while macOS Option always sets altKey. As in
-  // keybindings.ts, AltGr text other than a plain letter or digit, like the
-  // micro sign on German AltGr+M, is not a launcher letter.
-  if (event.getModifierState?.("AltGraph") && !/^[a-z0-9]$/i.test(event.key)) return null;
-  const typed = event.key.toLowerCase();
-  // Non-Latin letters and combining marks match by physical key, like the
-  // modified shortcuts in keybindings.ts; one key can type several, such as
-  // the Arabic lam alef ligature. Anything else typed on a letter key, like an
-  // accented Latin letter, punctuation or a dead key, matches only itself.
-  const physical =
-    /^[\p{L}\p{M}]+$/u.test(typed) && !/\p{Script=Latin}/u.test(typed)
-      ? event.code?.match(/^Key([A-Z])$/)?.[1]?.toLowerCase()
-      : undefined;
+  const letters = surfaceShortcutLetters(event);
   return (
-    actions.find((action) => {
-      if (!action.available) return false;
-      const shortcut = action.shortcut.toLowerCase();
-      return shortcut === typed || shortcut === physical;
-    }) ?? null
+    actions.find((action) => action.available && letters.includes(action.shortcut.toLowerCase())) ??
+    null
   );
 }
 
