@@ -115,3 +115,19 @@ it("leaves a non-Latin launcher letter to the launcher by its physical key", asy
   expect(composerKeys).toEqual([]);
   expect(received).toEqual(["\u0435"]);
 });
+
+it.each([
+  { key: "b", code: "KeyN", composer: [], launcher: ["b"] },
+  { key: "x", code: "KeyB", composer: ["x"], launcher: [] },
+])("routes Dvorak $key on $code by the typed letter", async ({ key, code, composer, launcher }) => {
+  const composerKeys: string[] = [];
+  const received: string[] = [];
+  await using screen = await render(<Chat composerKeys={composerKeys} />, options);
+  await screen.rerender(<Chat composerKeys={composerKeys} launcher={{ keys: "BT", received }} />);
+
+  const event = new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true });
+  (document.activeElement ?? document.body).dispatchEvent(event);
+
+  expect(composerKeys).toEqual(composer);
+  expect(received).toEqual(launcher);
+});
