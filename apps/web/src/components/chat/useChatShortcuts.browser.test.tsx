@@ -119,7 +119,8 @@ it("leaves a non-Latin launcher letter to the launcher by its physical key", asy
 it.each([
   { key: "b", code: "KeyN", composer: [], launcher: ["b"] },
   { key: "x", code: "KeyB", composer: ["x"], launcher: [] },
-])("routes Dvorak $key on $code by the typed letter", async ({ key, code, composer, launcher }) => {
+  { key: "è", code: "KeyT", composer: ["è"], launcher: [] },
+])("routes $key on $code by the typed letter", async ({ key, code, composer, launcher }) => {
   const composerKeys: string[] = [];
   const received: string[] = [];
   await using screen = await render(<Chat composerKeys={composerKeys} />, options);
