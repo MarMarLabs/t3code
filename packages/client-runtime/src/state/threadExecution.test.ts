@@ -406,5 +406,16 @@ describe("presentProviderGoal", () => {
     expect(usage(999_500)).toBe("1m / 2m tokens");
     expect(usage(999_999)).toBe("1m / 2m tokens");
     expect(usage(1_000_000)).toBe("1m / 2m tokens");
+    expect(
+      presentProviderGoal(
+        {
+          objective: "Ship the feature",
+          status: "paused",
+          tokensUsed: 999_500,
+          tokenBudget: 999_500,
+        },
+        false,
+      ).usage,
+    ).toBe("1m / 1m tokens");
   });
 });
